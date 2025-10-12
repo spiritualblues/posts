@@ -80,4 +80,4 @@ A safer solution was to document the memory usage, which was what ended up happe
 
 Personally, I feel the documentation solution was the wrong call. Many people won't see the warning and get burned this the same way as I did.
 
-To me personally the memory leak caused more pain than longer-running transactions ever would, but I there are Django projects where the fix could cause issues. There might even be someone out there who relies on extra memory usage to generate more heat for their [workflow](https://xkcd.com/1172/).
+To me personally the memory leak caused more pain than longer-running transactions ever would, but there are Django projects where the fix would cause issues. There might even be someone out there who relies on extra memory usage to generate more heat for their [workflow](https://xkcd.com/1172/).
