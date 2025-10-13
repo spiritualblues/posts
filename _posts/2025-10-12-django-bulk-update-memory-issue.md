@@ -4,15 +4,19 @@ title: Django bulk_update memory issue
 date: 2025-10-12 23:29 +0100
 ---
 
-Recently, I had to write a Django migration to update hundreds of thousands of database objects. With some paper-napkin math I calculated that I can fit all the necessary data in memory, making the migration much simpler than it would have been otherwise. 
+Recently, I had to write a Django migration to update hundreds of thousands of database objects.
 
-I only had to make sure to load only the necessary columns. Django's [`only` queryset method](https://docs.djangoproject.com/en/5.2/ref/models/querysets/#only) came in very handy:
+## Loading the data
+
+With some paper-napkin math I calculated that I can fit all the necessary data in memory, making the migration much simpler than it would have been otherwise. 
+
+First I had to make sure to load only the necessary columns. Django's [`only` queryset method](https://docs.djangoproject.com/en/5.2/ref/models/querysets/#only) came in very handy:
 
 ```python
 objs_to_update = TheObject.objects.only("id", "field1", "field2", "field3").all()
 ```
 
-Because I generally don't trust my paper napkin math, I also made sure to log how much memory each of the steps were using:
+Because I generally don't trust my paper-napkin math, I also made sure to log how much memory each of the steps were using:
 
 
 ```python
@@ -41,43 +45,41 @@ Calling `obj.save(update_only="field3")` would have been one option, but it woul
 TheObject.objects.bulk_update(objs=objs_to_update, fields=["field3"])
 ```
 
-Running this statement as is would have generated a HUGE update statement that my database would not have enjoyed seeing. But luckily, `bulk_update` has a `batch_size` parameter that chunks one huge update into multiple smaller ones:
+Running this statement as is would have generated a HUGE update statement that my database would not have enjoyed seeing. But luckily, `bulk_update` has a `batch_size` parameter that chunks the huge update into multiple smaller ones:
 
 ```python
 TheObject.objects.bulk_update(objs=objs_to_update, fields=["field3"], batch_size=250)
 ```
 
-Unfortunately for me, the way `bulk_update` works wasn't what I expected, and it killed my migration with a SIGTERM. ☠️
+Unfortunately for me, the way `bulk_update` works wasn't what I expected, and it killed my migration with a `SIGTERM` when I ran it in production. ☠️
 
 ## Investigating `bulk_update`
 
-Django first prepares a [list of all when clauses](https://github.com/django/django/blob/main/django/db/models/query.py#L937-L956), then creates the transaction, and finally executes the updates one by one in a loop.
+Django first prepares a [list of all update clauses](https://github.com/django/django/blob/main/django/db/models/query.py#L937-L956), then creates the transaction, and finally executes the updates one by one in a loop.
 
-I measured memory consumption from within `bulk_update`. After the for loop the memory increased to 4.8GB. The `updates` list ended up taking an extra 2.8GB. That's more than all the data I loaded from the database. 800MB more than I had available on the machine, which explained the SIGTERM.
+I measured memory consumption from within `bulk_update`. After the for loop the memory increased to 4.8GB. The `updates` list ended up taking an extra 2.8GB. That's more than all the data I loaded from the database. 800MB more than I had available on the machine, which explained the `SIGTERM`.
 
 ## The solution
 
-The solution for this was to implement my own batching and not using Django's `batch_size` at all:
+The solution for this was to implement my own batching and not using Django's `batch_size`:
 
 ```python
 with transaction.atomic():
     for batch in batched(things, 250):
         TheObject.objects.bulk_update(objs=objs_to_update, fields=["field3"])
 ```
-This makes sure that we only ever have a maximum 250 when statements in memory at a time. I did some measurements again, and only 62MB of additional memory was used during all of this. With this change, my migration finished successfully! 🎉
+This makes sure that we only ever have a maximum 250 update statements in memory at a time. I did some measurements again, and only 62MB of additional memory was used during all of this. With this change, my migration finished successfully! 🎉
 
 ## Reporting the issue to Django
 
 I reported this issue on the Django issue tracker: [#36526 bulk_update uses more memory than expected](https://code.djangoproject.com/ticket/36526). The ticket received a patch with a solution [in a few hours](https://github.com/django/django/pull/19677/files), but unfortunately, the solution got rejected. 
 
-There was concern that preparing the update statements within the transaction would prolong it in typical cases and cause all sorts of unintended problems associated with long-running transactions.
+There was concern that preparing the update statements within the transaction would prolong it in typical cases and cause all sorts of unintended problems associated with long-running transactions. There is a separate ticket about the performance of [building the update statement](https://code.djangoproject.com/ticket/31202).
 
-A safer solution was to document the memory usage, which was what ended up happening. `batch_update` now has the following warning:
+A safer solution was to document the memory usage, which was what ended up being the solution that closed my ticket. `batch_update` now has the following warning:
 
 > When updating a large number of objects, be aware that bulk_update() prepares all of the WHEN clauses for every object across all batches before executing any queries. This can require more memory than expected.
 
 ## Fin
 
-Personally, I feel the documentation solution was the wrong call. Many people won't see the warning and get burned this the same way as I did.
-
-To me personally the memory leak caused more pain than longer-running transactions ever would, but there are Django projects where the fix would cause issues. There might even be someone out there who relies on extra memory usage to generate more heat for their [workflow](https://xkcd.com/1172/).
+To me personally the memory leak caused more pain than longer-running transactions ever would, but I understand there are Django projects where the fix would cause issues. There might even be someone out there who relies on extra memory usage to generate more heat for their [workflow](https://xkcd.com/1172/).
